@@ -263,11 +263,25 @@
       min-height: 44px;
     }
     .icon-btn:active { filter: brightness(1.1); }
+    #muteBtn {
+      position: fixed;
+      z-index: 9;
+      top: max(12px, env(safe-area-inset-top, 0px));
+      right: max(12px, env(safe-area-inset-right, 0px));
+      white-space: nowrap;
+      min-width: 72px;
+    }
+    #muteBtn[aria-pressed="true"] { color: var(--muted); }
+    /* During play on touch, PAUSE already owns the top-right corner. */
+    body.touch-ui[data-mode="play"] #muteBtn {
+      top: calc(max(12px, env(safe-area-inset-top, 0px)) + 52px);
+    }
     @media (max-height: 450px), (max-width: 400px) {
       .steer-btn { width: 64px; height: 64px; font-size: 26px; }
       .pedal-brake { width: 60px; height: 60px; }
       .pedal-gas { width: 74px; height: 92px; }
       .fire-btn { width: 68px; height: 52px; font-size: 12px; }
+      #muteBtn { min-width: 64px; padding: 10px 10px; }
     }
     @media (orientation: landscape) and (max-height: 500px) {
       .steer-btn { width: 58px; height: 58px; font-size: 22px; }
@@ -358,7 +372,7 @@
     <div class="row fire-row"><span>FIRE</span><b id="fireVal">SPACE</b></div>
     <div class="row best"><span>BEST</span><b id="bestVal">0</b></div>
   </div>
-  <div id="hint">Arrows / WASD drive · Space or click fires · R restart · Esc pause</div>
+  <div id="hint">Arrows / WASD drive · Space or click fires · R restart · Esc pause · SOUND mutes</div>
   <div id="flash"></div>
   <div id="reticle" aria-hidden="true">
     <div class="reticle-label">LOCK</div>
@@ -367,6 +381,7 @@
   </div>
   <div id="bubbles"></div>
 
+  <button type="button" class="icon-btn" id="muteBtn" aria-pressed="false" aria-label="Mute sound">SOUND</button>
   <div id="touch-chrome">
     <button type="button" class="icon-btn" id="pauseBtn" aria-label="Pause">PAUSE</button>
   </div>
@@ -386,8 +401,8 @@
       <p class="sub">Eight lanes each way. Left lanes run faster — find a gap and weave. Cut someone off and they may pull a gun. Lock on and shoot back.</p>
       <div class="swatches" id="swatches"></div>
       <button class="btn" id="driveBtn" type="button">DRIVE</button>
-      <p class="sub kb-hint" style="margin:16px 0 0;font-size:12px">Arrows / WASD drive · Space or click fires · R restart · Esc pause</p>
-      <p class="sub touch-hint" style="margin:16px 0 0;font-size:12px">On-screen steer, gas, and brake. FIRE shoots the locked car. Pause is at the top right.</p>
+      <p class="sub kb-hint" style="margin:16px 0 0;font-size:12px">Arrows / WASD drive · Space or click fires · R restart · Esc pause · SOUND mutes</p>
+      <p class="sub touch-hint" style="margin:16px 0 0;font-size:12px">On-screen steer, gas, and brake. FIRE shoots the locked car. SOUND mutes. Pause is at the top right.</p>
     </div>
   </div>
 
@@ -438,6 +453,7 @@ import * as THREE from 'three';
 const TEST_HOLD = new URLSearchParams(location.search).has('test');
 const LS_BEST = 'roadRage.bestScore';
 const LS_COLOR = 'roadRage.carColor';
+const LS_MUTE = 'roadRage.muted';
 const COLORS = ['#e23b2e', '#f4a10a', '#f2d40a', '#2bb56f', '#2a8adf', '#7b4fe0', '#f3f3f3', '#222226'];
 
 const LANES_PER_DIR = 8;
@@ -500,6 +516,364 @@ let mouseFire = false;
 
 function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
+// Procedural Web Audio. No sample files. A near-miss shout plays only after
+// clips are registered with roadAudio.addShoutClip() — see that function.
+const roadAudio = {
+  ctx: null,
+  muted: lsGet(LS_MUTE) === '1',
+  ready: false,
+  rpm: 0.18,
+  shotCount: 0,
+  playerShots: 0,
+  npcShots: 0,
+  shoutCount: 0,
+  lastRates: [],
+  lastThumps: [],
+  shoutClips: [],
+  brakeHeld: false,
+  engine: null,
+  brake: null,
+  master: null,
+  pre: null,
+  analyser: null,
+  shots: null,
+};
+
+function paintMuteButton() {
+  const btn = document.getElementById('muteBtn');
+  if (!btn) return;
+  const muted = roadAudio.muted;
+  btn.textContent = muted ? 'MUTED' : 'SOUND';
+  btn.setAttribute('aria-pressed', muted ? 'true' : 'false');
+  btn.setAttribute('aria-label', muted ? 'Unmute sound' : 'Mute sound');
+}
+
+function makePeriodicBuffer(ctx, baseHz, fillCycle) {
+  const cycleN = Math.max(8, Math.floor(ctx.sampleRate / baseHz));
+  const cycles = 8;
+  const buf = ctx.createBuffer(1, cycleN * cycles, ctx.sampleRate);
+  const cycle = new Float32Array(cycleN);
+  fillCycle(cycle, cycleN);
+  const data = buf.getChannelData(0);
+  for (let c = 0; c < cycles; c++) data.set(cycle, c * cycleN);
+  return buf;
+}
+
+function setupAudioGraph() {
+  const ctx = roadAudio.ctx;
+  const pre = ctx.createGain();
+  pre.gain.value = 1;
+  const comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -14;
+  comp.knee.value = 10;
+  comp.ratio.value = 5;
+  comp.attack.value = 0.004;
+  comp.release.value = 0.14;
+  const master = ctx.createGain();
+  master.gain.value = roadAudio.muted ? 0 : 1;
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0.35;
+  pre.connect(comp);
+  comp.connect(master);
+  master.connect(analyser);
+  analyser.connect(ctx.destination);
+  roadAudio.pre = pre;
+  roadAudio.master = master;
+  roadAudio.analyser = analyser;
+
+  const engineBuf = makePeriodicBuffer(ctx, 46, (cycle, n) => {
+    for (let i = 0; i < n; i++) {
+      const p = i / n;
+      const env = Math.exp(-p * 11);
+      const tone = Math.sin(p * Math.PI * 2) * 0.62
+        + Math.sin(p * Math.PI * 4) * 0.28
+        + Math.sin(p * Math.PI * 6) * 0.12;
+      const grit = Math.sin(p * Math.PI * 2 * 9.0) * Math.sin(p * Math.PI * 2 * 5.0) * env;
+      cycle[i] = tone * (0.42 + env * 0.7) + grit * 0.38;
+    }
+  });
+  const engineSrc = ctx.createBufferSource();
+  engineSrc.buffer = engineBuf;
+  engineSrc.loop = true;
+  engineSrc.playbackRate.value = 0.9;
+  const engineFilter = ctx.createBiquadFilter();
+  engineFilter.type = 'lowpass';
+  engineFilter.frequency.value = 520;
+  engineFilter.Q.value = 0.7;
+  const shaper = ctx.createWaveShaper();
+  const curve = new Float32Array(256);
+  for (let i = 0; i < 256; i++) {
+    const x = i / 128 - 1;
+    curve[i] = Math.tanh(x * 2.4);
+  }
+  shaper.curve = curve;
+  shaper.oversample = '2x';
+  const engineGain = ctx.createGain();
+  engineGain.gain.value = 0;
+  engineSrc.connect(engineFilter);
+  engineFilter.connect(shaper);
+  shaper.connect(engineGain);
+  engineGain.connect(pre);
+  engineSrc.start();
+  roadAudio.engine = { src: engineSrc, filter: engineFilter, gain: engineGain, baseHz: 46 };
+
+  const brakeBuf = makePeriodicBuffer(ctx, 28, (cycle, n) => {
+    for (let i = 0; i < n; i++) {
+      const p = i / n;
+      const wobble = 0.65 + 0.35 * Math.sin(p * Math.PI * 2 * 3);
+      const tone = Math.sin(p * Math.PI * 2 * 78) * wobble;
+      const grit = Math.sin(p * Math.PI * 2 * 43) * Math.sin(p * Math.PI * 2 * 19);
+      cycle[i] = tone * 0.72 + grit * 0.28;
+    }
+  });
+  const brakeSrc = ctx.createBufferSource();
+  brakeSrc.buffer = brakeBuf;
+  brakeSrc.loop = true;
+  brakeSrc.playbackRate.value = 1;
+  const brakeFilter = ctx.createBiquadFilter();
+  brakeFilter.type = 'bandpass';
+  brakeFilter.frequency.value = 2100;
+  brakeFilter.Q.value = 4.5;
+  const brakeGain = ctx.createGain();
+  brakeGain.gain.value = 0;
+  brakeSrc.connect(brakeFilter);
+  brakeFilter.connect(brakeGain);
+  brakeGain.connect(pre);
+  brakeSrc.start();
+  roadAudio.brake = { src: brakeSrc, filter: brakeFilter, gain: brakeGain };
+
+  const crack = (dur, pow) => {
+    const length = Math.max(1, Math.floor(ctx.sampleRate * dur));
+    const buf = ctx.createBuffer(1, length, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < length; i++) {
+      const env = Math.pow(1 - i / length, pow);
+      d[i] = (Math.random() * 2 - 1) * env;
+    }
+    return buf;
+  };
+  roadAudio.shots = {
+    player: [0, 1, 2, 3].map((i) => crack(0.055 + i * 0.012, 2.4 + i * 0.15)),
+    npc: [0, 1, 2, 3].map((i) => crack(0.09 + i * 0.016, 1.5 + i * 0.1)),
+  };
+
+  // One-sample silent buffer played during the unlock gesture so iOS arms the output.
+  const silent = ctx.createBuffer(1, 1, ctx.sampleRate);
+  const pop = ctx.createBufferSource();
+  pop.buffer = silent;
+  pop.connect(pre);
+  pop.start();
+  roadAudio.ready = true;
+}
+
+function unlockAudio() {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return false;
+  try {
+    if (!roadAudio.ctx) {
+      roadAudio.ctx = new Ctx();
+      setupAudioGraph();
+    }
+    if (roadAudio.ctx.state === 'suspended') {
+      const pending = roadAudio.ctx.resume();
+      if (pending && pending.catch) pending.catch(() => {});
+    }
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function setMuted(muted) {
+  roadAudio.muted = !!muted;
+  lsSet(LS_MUTE, roadAudio.muted ? '1' : '0');
+  paintMuteButton();
+  if (roadAudio.master && roadAudio.ctx) {
+    roadAudio.master.gain.setTargetAtTime(roadAudio.muted ? 0 : 1, roadAudio.ctx.currentTime, 0.02);
+  }
+}
+
+function playShot(kind) {
+  if (!roadAudio.ready || !roadAudio.ctx) return false;
+  const ctx = roadAudio.ctx;
+  if (ctx.state === 'suspended') return false;
+  const player = kind !== 'npc';
+  const bank = player ? roadAudio.shots.player : roadAudio.shots.npc;
+  const buf = bank[(Math.random() * bank.length) | 0];
+  const t = ctx.currentTime;
+  const rate = (player ? 0.92 : 0.88) + Math.random() * 0.22;
+  const thumpHz = (player ? 128 : 78) * (0.9 + Math.random() * 0.22);
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.playbackRate.value = rate;
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.value = (player ? 1900 : 820) * (0.9 + Math.random() * 0.2);
+  bp.Q.value = player ? 0.65 : 1.15;
+  const ng = ctx.createGain();
+  ng.gain.setValueAtTime(player ? 0.62 : 0.38, t);
+  ng.gain.exponentialRampToValueAtTime(0.001, t + (player ? 0.09 : 0.13));
+  src.connect(bp);
+  bp.connect(ng);
+  ng.connect(roadAudio.pre);
+  src.start(t);
+  src.stop(t + 0.2);
+
+  const osc = ctx.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(thumpHz, t);
+  osc.frequency.exponentialRampToValueAtTime(player ? 48 : 36, t + 0.09);
+  const og = ctx.createGain();
+  og.gain.setValueAtTime(player ? 0.72 : 0.48, t);
+  og.gain.exponentialRampToValueAtTime(0.001, t + (player ? 0.1 : 0.14));
+  osc.connect(og);
+  og.connect(roadAudio.pre);
+  osc.start(t);
+  osc.stop(t + 0.16);
+
+  roadAudio.shotCount += 1;
+  if (player) roadAudio.playerShots += 1;
+  else roadAudio.npcShots += 1;
+  roadAudio.lastRates.push(rate);
+  roadAudio.lastThumps.push(thumpHz);
+  if (roadAudio.lastRates.length > 8) {
+    roadAudio.lastRates.shift();
+    roadAudio.lastThumps.shift();
+  }
+  return true;
+}
+
+function playBrakeBite() {
+  if (!roadAudio.ready || roadAudio.ctx.state === 'suspended') return;
+  const ctx = roadAudio.ctx;
+  const t = ctx.currentTime;
+  const buf = roadAudio.shots.npc[0];
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.playbackRate.value = 1.6 + Math.random() * 0.3;
+  const hp = ctx.createBiquadFilter();
+  hp.type = 'highpass';
+  hp.frequency.value = 1400;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.22, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+  src.connect(hp);
+  hp.connect(g);
+  g.connect(roadAudio.pre);
+  src.start(t);
+  src.stop(t + 0.1);
+}
+
+function updateDrive(dt, gas, brake, speedNorm) {
+  if (!roadAudio.ready) return;
+  const now = roadAudio.ctx.currentTime;
+  const cruise = 0.16 + speedNorm * 0.62;
+  const target = gas ? Math.min(1, cruise + 0.3) : cruise * 0.9;
+  const follow = gas ? 3.4 : 1.7;
+  roadAudio.rpm += (target - roadAudio.rpm) * Math.min(1, dt * follow);
+  const rate = 0.78 + roadAudio.rpm * 1.7;
+  roadAudio.engine.src.playbackRate.setTargetAtTime(rate, now, 0.045);
+  roadAudio.engine.filter.frequency.setTargetAtTime(380 + roadAudio.rpm * 1600 + (gas ? 480 : 0), now, 0.06);
+  const vol = 0.15 + roadAudio.rpm * 0.22 + (gas ? 0.06 : 0);
+  roadAudio.engine.gain.gain.setTargetAtTime(vol, now, 0.06);
+  const braking = !!(brake && !gas && speedNorm > 0.05);
+  if (braking && !roadAudio.brakeHeld) playBrakeBite();
+  roadAudio.brakeHeld = braking;
+  const squeal = braking ? Math.min(0.36, 0.12 + speedNorm * 0.32) : 0;
+  roadAudio.brake.gain.gain.setTargetAtTime(squeal, now, braking ? 0.03 : 0.05);
+  roadAudio.brake.src.playbackRate.setTargetAtTime(0.92 + speedNorm * 0.28, now, 0.08);
+}
+
+function cutDrive() {
+  if (!roadAudio.ready) return;
+  const now = roadAudio.ctx.currentTime;
+  roadAudio.engine.gain.gain.setTargetAtTime(0, now, 0.03);
+  roadAudio.brake.gain.gain.setTargetAtTime(0, now, 0.025);
+  roadAudio.brakeHeld = false;
+  roadAudio.rpm = 0.18;
+}
+
+function syncDriveAudio(dt) {
+  if (!roadAudio.ready) return;
+  if (mode === 'play') {
+    const gas = !!(keys.ArrowUp || keys.KeyW || touchCtl.gas);
+    const brake = !!(keys.ArrowDown || keys.KeyS || touchCtl.brake);
+    updateDrive(dt, gas, brake, speed / MAX_SPEED);
+  } else {
+    cutDrive();
+  }
+}
+
+// Drop in recorded driver shouts later. Each near-miss taunt (fist + bubble)
+// calls playShout(), which plays one registered clip. With none registered
+// this is a no-op — no synthesized voices.
+//
+//   await __roadRage.audio.addShoutClip('audio/shouts/watch-it.m4a');
+//   await __roadRage.audio.addShoutClip('audio/shouts/asshole.mp3', { name: 'asshole' });
+//
+// `source` may be a URL, an ArrayBuffer, or an AudioBuffer. Short m4a, mp3,
+// or ogg clips are the right size. Call this after a tap so iOS can decode.
+async function addShoutClip(source, opts) {
+  const options = opts || {};
+  if (!unlockAudio() || !roadAudio.ctx) throw new Error('Audio is not available');
+  let buffer = source;
+  if (typeof source === 'string') {
+    const res = await fetch(source);
+    if (!res.ok) throw new Error('Could not load shout clip');
+    buffer = await roadAudio.ctx.decodeAudioData(await res.arrayBuffer());
+  } else if (source instanceof ArrayBuffer) {
+    buffer = await roadAudio.ctx.decodeAudioData(source.slice(0));
+  }
+  if (!buffer || typeof buffer.getChannelData !== 'function') throw new Error('Shout clip is not audio');
+  // Copy into this page's audio context so a buffer built elsewhere still plays on iOS.
+  if (typeof roadAudio.ctx.createBuffer === 'function') {
+    try {
+      const copy = roadAudio.ctx.createBuffer(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
+      for (let c = 0; c < buffer.numberOfChannels; c++) copy.copyToChannel(buffer.getChannelData(c), c);
+      buffer = copy;
+    } catch (e) { /* use the original buffer */ }
+  }
+  roadAudio.shoutClips.push({
+    name: options.name || ('shout-' + (roadAudio.shoutClips.length + 1)),
+    buffer,
+  });
+  return roadAudio.shoutClips.length;
+}
+
+function playShout() {
+  if (!roadAudio.ready || !roadAudio.shoutClips.length) return false;
+  if (roadAudio.ctx.state === 'suspended') return false;
+  const clip = roadAudio.shoutClips[(Math.random() * roadAudio.shoutClips.length) | 0];
+  const src = roadAudio.ctx.createBufferSource();
+  src.buffer = clip.buffer;
+  const g = roadAudio.ctx.createGain();
+  g.gain.value = 0.95;
+  src.connect(g);
+  g.connect(roadAudio.pre);
+  src.start();
+  roadAudio.shoutCount += 1;
+  return true;
+}
+
+function audioState() {
+  return {
+    unlocked: !!roadAudio.ready,
+    muted: roadAudio.muted,
+    context: roadAudio.ctx ? roadAudio.ctx.state : 'none',
+    engine: roadAudio.engine ? roadAudio.engine.gain.gain.value : 0,
+    brake: roadAudio.brake ? roadAudio.brake.gain.gain.value : 0,
+    rpm: roadAudio.rpm,
+    shots: roadAudio.shotCount,
+    playerShots: roadAudio.playerShots,
+    npcShots: roadAudio.npcShots,
+    shouts: roadAudio.shoutCount,
+    shoutClips: roadAudio.shoutClips.length,
+    lastRates: roadAudio.lastRates.slice(),
+    lastThumps: roadAudio.lastThumps.slice(),
+  };
+}
 
 function computeTouchUI() {
   const ua = navigator.userAgent || '';
@@ -1526,6 +1900,8 @@ function provoke(n, reason) {
   triggerFist(n);
   const lines = n.hostile ? ANGRY : TAUNTS;
   say(n, lines[(Math.random() * lines.length) | 0], 'taunt');
+  // Recorded shout clips, once registered. No-op until then.
+  playShout();
 }
 
 function updateNearMiss() {
@@ -1655,6 +2031,7 @@ function tryFire() {
   }
   spawnBullet(from, dir, 92, PLAYER_DMG, true);
   spawnFlash(from.x, from.y, from.z, 1.15);
+  playShot('player');
   return true;
 }
 
@@ -1684,6 +2061,7 @@ function updateCombatAI(dt) {
     };
     spawnBullet(m, dir, 76, NPC_DMG, false);
     spawnFlash(m.x, m.y, m.z, 1.35);
+    playShot('npc');
     n.fireCd = 0.82 + Math.random() * 0.55;
   }
 }
@@ -1945,6 +2323,7 @@ function beginCrash(reason) {
   puffSmoke(p.x, 0.5, p.z, 1.3);
   lockTarget = null;
   reticleEl.classList.remove('show');
+  cutDrive();
 }
 
 function poseCrashedCar() {
@@ -2169,6 +2548,7 @@ function setMode(next) {
   hud.root.style.display = (next === 'play' || next === 'pause' || next === 'crash' || next === 'crashing') ? 'block' : 'none';
   if (next !== 'play') clearTouchCtl();
   if (next !== 'play') reticleEl.classList.remove('show');
+  if (next !== 'play') cutDrive();
 }
 
 function showGameOver() {
@@ -2337,6 +2717,7 @@ function simulate(dt, t) {
   else {
     updateBubbles(dt);
   }
+  syncDriveAudio(dt);
 }
 
 function initScene() {
@@ -2498,12 +2879,21 @@ bindHold(document.getElementById('btnGas'), 'gas');
 bindHold(document.getElementById('btnBrake'), 'brake');
 bindHold(document.getElementById('btnFire'), 'fire');
 
-document.getElementById('driveBtn').addEventListener('click', startGame);
+document.getElementById('driveBtn').addEventListener('click', () => { unlockAudio(); startGame(); });
 document.getElementById('retryBtn').addEventListener('click', startGame);
 document.getElementById('resumeBtn').addEventListener('click', () => { if (mode === 'pause') setMode('play'); });
 document.getElementById('pauseRestartBtn').addEventListener('click', startGame);
 document.getElementById('titleBtn').addEventListener('click', goTitle);
 document.getElementById('pauseBtn').addEventListener('click', () => { if (mode === 'play') setMode('pause'); });
+document.getElementById('muteBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  unlockAudio();
+  setMuted(!roadAudio.muted);
+});
+paintMuteButton();
+document.addEventListener('pointerdown', () => { unlockAudio(); }, { capture: true });
+document.addEventListener('keydown', () => { unlockAudio(); }, { capture: true });
+document.addEventListener('touchend', () => { unlockAudio(); }, { capture: true });
 
 (function setupSwatches() {
   const box = document.getElementById('swatches');
@@ -2605,7 +2995,25 @@ api.getState = () => {
       erratic: n.erratic, hostile: n.hostile, hp: n.hp, wrecked: n.wrecked,
       halfW: n.halfW, halfL: n.halfL, gunOut: n.gunOut,
     })),
+    audio: audioState(),
   };
+};
+api.audio = {
+  unlock: unlockAudio,
+  setMuted,
+  toggleMute() { setMuted(!roadAudio.muted); },
+  playShot,
+  playShout,
+  addShoutClip,
+  state: audioState,
+  async level() {
+    if (!roadAudio.analyser) return 0;
+    const bins = new Float32Array(roadAudio.analyser.fftSize);
+    roadAudio.analyser.getFloatTimeDomainData(bins);
+    let sum = 0;
+    for (let i = 0; i < bins.length; i++) sum += bins[i] * bins[i];
+    return Math.sqrt(sum / bins.length);
+  },
 };
 api.projectNose = projectNose;
 api.densityAt = densityAt;
