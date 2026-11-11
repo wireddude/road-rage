@@ -528,6 +528,9 @@ const roadAudio = {
   playerShots: 0,
   npcShots: 0,
   shoutCount: 0,
+  crashCount: 0,
+  lastCrash: '',
+  duckUntil: 0,
   lastRates: [],
   lastThumps: [],
   shoutClips: [],
@@ -680,9 +683,34 @@ function unlockAudio() {
       const pending = roadAudio.ctx.resume();
       if (pending && pending.catch) pending.catch(() => {});
     }
+    registerBundledShouts();
     return true;
   } catch (e) {
     return false;
+  }
+}
+
+// Files in audio/shouts/ that ship with the game. Add another entry when a
+// new owner recording lands in that folder; playShout() picks one at random.
+const BUNDLED_SHOUTS = [
+  { url: 'audio/shouts/asshole.m4a', name: 'asshole' },
+];
+const bundledShoutData = BUNDLED_SHOUTS.map((file) => ({
+  name: file.name,
+  data: fetch(file.url).then((res) => {
+    if (!res.ok) throw new Error(file.url);
+    return res.arrayBuffer();
+  }),
+}));
+
+function registerBundledShouts() {
+  if (!roadAudio.ready || roadAudio.shoutsQueued) return;
+  roadAudio.shoutsQueued = true;
+  for (const file of bundledShoutData) {
+    file.data.then((buf) => {
+      if (roadAudio.shoutClips.some((c) => c.name === file.name)) return null;
+      return addShoutClip(buf, { name: file.name });
+    }).catch(() => {});
   }
 }
 
@@ -691,7 +719,10 @@ function setMuted(muted) {
   lsSet(LS_MUTE, roadAudio.muted ? '1' : '0');
   paintMuteButton();
   if (roadAudio.master && roadAudio.ctx) {
-    roadAudio.master.gain.setTargetAtTime(roadAudio.muted ? 0 : 1, roadAudio.ctx.currentTime, 0.02);
+    const gain = roadAudio.master.gain;
+    const now = roadAudio.ctx.currentTime;
+    gain.cancelScheduledValues(now);
+    gain.setValueAtTime(roadAudio.muted ? 0 : 1, now);
   }
 }
 
@@ -776,8 +807,9 @@ function updateDrive(dt, gas, brake, speedNorm) {
   const rate = 0.78 + roadAudio.rpm * 1.7;
   roadAudio.engine.src.playbackRate.setTargetAtTime(rate, now, 0.045);
   roadAudio.engine.filter.frequency.setTargetAtTime(380 + roadAudio.rpm * 1600 + (gas ? 480 : 0), now, 0.06);
-  const vol = 0.15 + roadAudio.rpm * 0.22 + (gas ? 0.06 : 0);
-  roadAudio.engine.gain.gain.setTargetAtTime(vol, now, 0.06);
+  const duck = now < roadAudio.duckUntil ? 0.28 : 1;
+  const vol = (0.15 + roadAudio.rpm * 0.22 + (gas ? 0.06 : 0)) * duck;
+  roadAudio.engine.gain.gain.setTargetAtTime(vol, now, 0.05);
   const braking = !!(brake && !gas && speedNorm > 0.05);
   if (braking && !roadAudio.brakeHeld) playBrakeBite();
   roadAudio.brakeHeld = braking;
@@ -806,15 +838,11 @@ function syncDriveAudio(dt) {
   }
 }
 
-// Drop in recorded driver shouts later. Each near-miss taunt (fist + bubble)
-// calls playShout(), which plays one registered clip. With none registered
-// this is a no-op — no synthesized voices.
-//
-//   await __roadRage.audio.addShoutClip('audio/shouts/watch-it.m4a');
-//   await __roadRage.audio.addShoutClip('audio/shouts/asshole.mp3', { name: 'asshole' });
-//
-// `source` may be a URL, an ArrayBuffer, or an AudioBuffer. Short m4a, mp3,
-// or ogg clips are the right size. Call this after a tap so iOS can decode.
+// Near-miss taunts call playShout(). Bundled clips in BUNDLED_SHOUTS are
+// fetched at startup and decoded on the first tap (required for iOS).
+// More recordings: put a file in audio/shouts/ and add it to BUNDLED_SHOUTS,
+// or call addShoutClip('audio/shouts/your-clip.m4a', { name: 'your-clip' }).
+// `source` may be a URL, an ArrayBuffer, or an AudioBuffer.
 async function addShoutClip(source, opts) {
   const options = opts || {};
   if (!unlockAudio() || !roadAudio.ctx) throw new Error('Audio is not available');
@@ -846,14 +874,84 @@ function playShout() {
   if (!roadAudio.ready || !roadAudio.shoutClips.length) return false;
   if (roadAudio.ctx.state === 'suspended') return false;
   const clip = roadAudio.shoutClips[(Math.random() * roadAudio.shoutClips.length) | 0];
-  const src = roadAudio.ctx.createBufferSource();
+  const ctx = roadAudio.ctx;
+  const t = ctx.currentTime;
+  const src = ctx.createBufferSource();
   src.buffer = clip.buffer;
-  const g = roadAudio.ctx.createGain();
-  g.gain.value = 0.95;
+  const g = ctx.createGain();
+  // Louder than the engine loop so the line reads. Mute is the master gain.
+  g.gain.setValueAtTime(1.85, t);
   src.connect(g);
   g.connect(roadAudio.pre);
-  src.start();
+  src.start(t);
+  roadAudio.duckUntil = t + Math.min(1.6, (clip.buffer.duration || 0.9) + 0.08);
   roadAudio.shoutCount += 1;
+  roadAudio.lastShout = clip.name;
+  return true;
+}
+
+function playCrash(reason) {
+  if (!roadAudio.ready || !roadAudio.ctx || roadAudio.ctx.state === 'suspended') return false;
+  const ctx = roadAudio.ctx;
+  const t = ctx.currentTime;
+  const wall = reason === 'wall' || reason === 'median';
+  const vary = 0.9 + Math.random() * 0.18;
+  const dur = wall ? 0.26 : 0.32;
+  const length = Math.max(1, Math.floor(ctx.sampleRate * dur));
+  const buf = ctx.createBuffer(1, length, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < length; i++) {
+    const env = Math.pow(1 - i / length, wall ? 1.35 : 1.05);
+    data[i] = (Math.random() * 2 - 1) * env;
+  }
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.playbackRate.value = vary;
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.value = (wall ? 380 : 1100) * vary;
+  bp.Q.value = wall ? 0.55 : 0.8;
+  const ng = ctx.createGain();
+  ng.gain.setValueAtTime(wall ? 0.78 : 0.9, t);
+  ng.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  src.connect(bp);
+  bp.connect(ng);
+  ng.connect(roadAudio.pre);
+  src.start(t);
+
+  const osc = ctx.createOscillator();
+  osc.type = 'sine';
+  const f0 = (wall ? 78 : 128) * vary;
+  osc.frequency.setValueAtTime(f0, t);
+  osc.frequency.exponentialRampToValueAtTime(wall ? 30 : 38, t + 0.2);
+  const og = ctx.createGain();
+  og.gain.setValueAtTime(wall ? 1.05 : 0.82, t);
+  og.gain.exponentialRampToValueAtTime(0.001, t + 0.32);
+  osc.connect(og);
+  og.connect(roadAudio.pre);
+  osc.start(t);
+  osc.stop(t + 0.34);
+
+  if (!wall) {
+    const ping = ctx.createOscillator();
+    ping.type = 'square';
+    ping.frequency.setValueAtTime(620 * vary, t);
+    ping.frequency.exponentialRampToValueAtTime(160, t + 0.12);
+    const pf = ctx.createBiquadFilter();
+    pf.type = 'lowpass';
+    pf.frequency.value = 1600;
+    const pg = ctx.createGain();
+    pg.gain.setValueAtTime(0.2, t);
+    pg.gain.exponentialRampToValueAtTime(0.001, t + 0.13);
+    ping.connect(pf);
+    pf.connect(pg);
+    pg.connect(roadAudio.pre);
+    ping.start(t);
+    ping.stop(t + 0.15);
+  }
+
+  roadAudio.crashCount += 1;
+  roadAudio.lastCrash = wall ? 'wall' : 'car';
   return true;
 }
 
@@ -869,7 +967,11 @@ function audioState() {
     playerShots: roadAudio.playerShots,
     npcShots: roadAudio.npcShots,
     shouts: roadAudio.shoutCount,
+    lastShout: roadAudio.lastShout || '',
+    shoutNames: roadAudio.shoutClips.map((c) => c.name),
     shoutClips: roadAudio.shoutClips.length,
+    crashes: roadAudio.crashCount,
+    lastCrash: roadAudio.lastCrash,
     lastRates: roadAudio.lastRates.slice(),
     lastThumps: roadAudio.lastThumps.slice(),
   };
@@ -2324,6 +2426,7 @@ function beginCrash(reason) {
   lockTarget = null;
   reticleEl.classList.remove('show');
   cutDrive();
+  playCrash(crashReason);
 }
 
 function poseCrashedCar() {
@@ -3004,6 +3107,7 @@ api.audio = {
   toggleMute() { setMuted(!roadAudio.muted); },
   playShot,
   playShout,
+  playCrash,
   addShoutClip,
   state: audioState,
   async level() {
