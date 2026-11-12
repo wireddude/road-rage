@@ -4,7 +4,7 @@ A 3D endless highway game for desktop, iPhone, and iPad. Eight lanes each way. O
 
 Sound is synthesized in the page: a laser shot for the player and a lower one for hostile drivers, an engine that revs with the gas and speed, a brake squeal while braking, and an impact when the car crashes. The SOUND button mutes and the choice is remembered. Nothing plays on the title screen; pause and a crash cut the engine.
 
-A near-miss taunt plays one clip at random from `audio/shouts/` (the original “you asshole” memo plus the later driver lines). To add another recording, put the file in `audio/shouts/` and add it to `BUNDLED_SHOUTS` in `index.html`, or register it yourself:
+A paint-close near-miss plays one clip at random from `audio/shouts/` (the original “you asshole” memo plus the later driver lines). A slightly wider squeeze still shows the fist and speech bubble, without the yell, and another yell waits about four seconds. To add another recording, put the file in `audio/shouts/` and add it to `BUNDLED_SHOUTS` in `index.html`, or register it yourself:
 
 ```js
 await __roadRage.audio.addShoutClip('audio/shouts/watch-it.m4a', { name: 'watch-it' });

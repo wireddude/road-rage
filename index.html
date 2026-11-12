@@ -505,6 +505,14 @@ const CROSS_BUMP = 48;
 const WALL_WRECK_SPEED = 20;
 const HEADON_WRECK_REL = 30;
 const REAR_WRECK_REL = 26;
+// Gap between car bodies, in world units. A centered pass in the next lane
+// leaves about 1.5 of air, so these only trip when you crowd someone.
+// Voice is the last sliver before contact ("I can see their paint").
+// The fist and bubble start a bit sooner so a squeeze still reads.
+const NEAR_VISUAL_LAT = 0.5;
+const NEAR_SHOUT_LAT = 0.22;
+const NEAR_ALONG = 0.45;
+const SHOUT_COOLDOWN = 4;
 const FIRE_CD = 0.2;
 const WRECK_SCORE = 800;
 
@@ -898,6 +906,7 @@ async function addShoutClip(source, opts) {
 }
 
 function playShout() {
+  if (shoutCd > 0) return false;
   if (!roadAudio.ready || !roadAudio.shoutClips.length) return false;
   if (roadAudio.ctx.state === 'suspended') return false;
   const clip = roadAudio.shoutClips[(Math.random() * roadAudio.shoutClips.length) | 0];
@@ -914,6 +923,7 @@ function playShout() {
   roadAudio.duckUntil = t + Math.min(1.6, (clip.buffer.duration || 0.9) + 0.08);
   roadAudio.shoutCount += 1;
   roadAudio.lastShout = clip.name;
+  shoutCd = SHOUT_COOLDOWN;
   return true;
 }
 
@@ -994,6 +1004,7 @@ function audioState() {
     playerShots: roadAudio.playerShots,
     npcShots: roadAudio.npcShots,
     shouts: roadAudio.shoutCount,
+    shoutCd,
     lastShout: roadAudio.lastShout || '',
     shoutNames: roadAudio.shoutClips.map((c) => c.name),
     shoutClips: roadAudio.shoutClips.length,
@@ -1057,6 +1068,7 @@ let fireCd = 0;
 let lockTarget = null;
 let quarry = null;
 let bumpCd = 0;
+let shoutCd = 0;
 let spawnSerial = 0;
 let shake = 0;
 let crossSpawnCd = 0;
@@ -1548,6 +1560,7 @@ function activateNpc(n, opts) {
   n.hop = 0;
   n.passed = false;
   n.inNear = false;
+  n.inTight = false;
   n.reactCd = 0;
   n.lane = opts.lane;
   n.z = opts.z;
@@ -2190,27 +2203,31 @@ function say(n, text, kind) {
   b.el.className = 'bubble show' + (kind === 'score' ? ' scorepop' : '');
 }
 
-function provoke(n, reason) {
+function provoke(n, reason, opts) {
   if (!n.alive || n.wrecked) return;
   if (n.reactCd > 0) return;
   n.reactCd = 2.35;
   triggerFist(n);
   const lines = (n.hostile || n.quarry) ? ANGRY : TAUNTS;
   say(n, lines[(Math.random() * lines.length) | 0], 'taunt');
-  // Recorded shout clips, once registered. No-op until then.
-  playShout();
+  // Voice is only for a paint-close squeeze. A wider pass is fist and bubble.
+  if (opts && opts.shout) playShout();
 }
 
 function updateNearMiss() {
   for (const n of npcs) {
     if (!n.alive || n.wrecked) continue;
-    if (Math.abs(n.z - playerZ) > 12) { n.inNear = false; continue; }
+    if (Math.abs(n.z - playerZ) > 12) { n.inNear = false; n.inTight = false; continue; }
     const d = separation(playerZ, playerLat, n.z, n.lat);
     const latGap = Math.abs(d.lat) - CAR_HALF_W - n.halfW;
     const alongGap = Math.abs(d.along) - CAR_HALF_L - n.halfL;
-    const near = latGap > 0.02 && latGap < 0.78 && alongGap < 0.5;
-    if (near && !n.inNear) provoke(n, 'near');
-    n.inNear = near;
+    const alongside = latGap > 0.02 && alongGap < NEAR_ALONG;
+    const visual = alongside && latGap < NEAR_VISUAL_LAT;
+    const tight = alongside && latGap < NEAR_SHOUT_LAT;
+    if (visual && !n.inNear) provoke(n, 'near', { shout: tight });
+    else if (tight && !n.inTight) playShout();
+    n.inNear = visual;
+    n.inTight = tight;
   }
 }
 
@@ -3250,6 +3267,7 @@ function resetRun() {
   lockTarget = null;
   quarry = null;
   bumpCd = 0;
+  shoutCd = 0;
   shake = 0;
   spawnSerial = 0;
   clearTraffic();
@@ -3310,6 +3328,7 @@ function updatePlay(dt, t) {
   runTime += dt;
   iframe = Math.max(0, iframe - dt);
   bumpCd = Math.max(0, bumpCd - dt);
+  shoutCd = Math.max(0, shoutCd - dt);
   fireCd = Math.max(0, fireCd - dt);
   if (ignoreSpace && !keys.Space) ignoreSpace = false;
 
