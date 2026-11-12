@@ -173,6 +173,13 @@
       background: transparent; color: var(--text);
       border: 1px solid var(--line);
     }
+    .btn.share {
+      background: transparent; color: #e9fbff;
+      border: 1px solid rgba(126, 246, 255, 0.75);
+      box-shadow: 0 0 18px rgba(126, 246, 255, 0.22);
+    }
+    #shareStatus { min-height: 1.2em; margin: 10px 0 0; font-size: 12px; }
+    #gameover .btn { min-height: 48px; }
     .btn-row { display: flex; justify-content: center; flex-wrap: wrap; gap: 10px; }
     @media (max-height: 420px) {
       .card { padding: 16px 18px 14px; }
@@ -435,8 +442,10 @@
       </div>
       <div class="btn-row">
         <button class="btn" id="retryBtn" type="button">RETRY</button>
+        <button class="btn share" id="shareBtn" type="button" aria-label="Share score">SHARE</button>
         <button class="btn secondary" id="titleBtn" type="button">TITLE</button>
       </div>
+      <p class="sub" id="shareStatus" aria-live="polite"></p>
       <p class="sub kb-hint" style="margin:14px 0 0;font-size:12px">R to restart · Esc to return to title</p>
     </div>
   </div>
@@ -501,7 +510,7 @@ const WRECK_SCORE = 800;
 
 const TAUNTS = [
   'Watch it!', 'Get off the road!', 'You maniac!', 'Asshole!',
-  'Learn to drive!', 'What the hell!', 'Move over!', 'You idiot!',
+  'Learn to drive!', 'What the fuck, man!', 'Move over!', 'You idiot!',
   'Outta my lane!', 'Nice driving, jerk!',
 ];
 const ANGRY = [
@@ -702,6 +711,13 @@ function unlockAudio() {
 // new owner recording lands in that folder; playShout() picks one at random.
 const BUNDLED_SHOUTS = [
   { url: 'audio/shouts/asshole.m4a', name: 'asshole' },
+  { url: 'audio/shouts/blinker.m4a', name: 'blinker' }, // It's called a blinker, learn how to use it.
+  { url: 'audio/shouts/oughta-sucker.m4a', name: 'oughta-sucker' }, // Why I oughta, I'm gonna get you sucker!
+  { url: 'audio/shouts/learn-to-drive.m4a', name: 'learn-to-drive' }, // Hey Buster, learn how to drive!
+  { url: 'audio/shouts/trying-to-drive.m4a', name: 'trying-to-drive' }, // Yeah, I'm trying to drive here!
+  { url: 'audio/shouts/game-on.m4a', name: 'game-on' }, // Oh no, you didn't! It's game on and you're going down!
+  { url: 'audio/shouts/fuck-man.m4a', name: 'fuck-man' }, // Hey, what the fuck, man?
+  { url: 'audio/shouts/mess-you-up.m4a', name: 'mess-you-up' }, // Opening phrase, then "I'm gonna mess you up."
 ];
 const bundledShoutData = BUNDLED_SHOUTS.map((file) => ({
   name: file.name,
@@ -2871,7 +2887,339 @@ function showGameOver() {
   const avg = runTime > 0.4 ? (distance / runTime) * MPH : 0;
   document.getElementById('goAvg').textContent = fmt(avg) + ' mph';
   document.getElementById('goHp').textContent = String(Math.ceil(health));
+  const shareStatus = document.getElementById('shareStatus');
+  if (shareStatus) shareStatus.textContent = '';
   setMode('crash');
+}
+
+const PLAY_URL = 'https://wireddude.github.io/road-rage/';
+
+function shareBlurb() {
+  return 'I scored ' + fmt(currentScore()) + ' in Road Rage. ' + PLAY_URL;
+}
+
+function roundRectPath(g, x, y, w, h, r) {
+  const radius = Math.min(r, w / 2, h / 2);
+  g.beginPath();
+  g.moveTo(x + radius, y);
+  g.arcTo(x + w, y, x + w, y + h, radius);
+  g.arcTo(x + w, y + h, x, y + h, radius);
+  g.arcTo(x, y + h, x, y, radius);
+  g.arcTo(x, y, x + w, y, radius);
+  g.closePath();
+}
+
+function roadPoint(t, lane) {
+  const widen = Math.pow(t, 1.45);
+  return [
+    540 + lane * (8 + widen * 112) + Math.sin(t * 3.1) * (1 - t) * 18,
+    430 + Math.pow(t, 0.92) * 450,
+  ];
+}
+
+function renderScoreCard() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1080;
+  canvas.height = 1350;
+  const g = canvas.getContext('2d');
+  const sky = g.createLinearGradient(0, 0, 0, 1350);
+  sky.addColorStop(0, '#050814');
+  sky.addColorStop(0.42, '#1a2a4a');
+  sky.addColorStop(0.72, '#101624');
+  sky.addColorStop(1, '#07080e');
+  g.fillStyle = sky;
+  g.fillRect(0, 0, 1080, 1350);
+
+  // Stars and speed streaks.
+  for (let i = 0; i < 70; i++) {
+    const x = (i * 97) % 1080;
+    const y = (i * 53) % 420;
+    g.fillStyle = 'rgba(255,255,255,' + (0.25 + (i % 5) * 0.12) + ')';
+    g.fillRect(x, y, i % 4 === 0 ? 3 : 2, i % 4 === 0 ? 3 : 2);
+  }
+  for (let i = 0; i < 14; i++) {
+    const y = 80 + i * 26;
+    g.strokeStyle = i % 2 ? 'rgba(126,246,255,0.18)' : 'rgba(255,90,216,0.14)';
+    g.lineWidth = 2;
+    g.beginPath();
+    g.moveTo(40 + (i % 3) * 30, y);
+    g.lineTo(280 + (i % 5) * 40, y);
+    g.stroke();
+  }
+
+  const glow = g.createRadialGradient(540, 500, 20, 540, 520, 420);
+  glow.addColorStop(0, 'rgba(255,77,58,0.35)');
+  glow.addColorStop(0.45, 'rgba(80,120,255,0.16)');
+  glow.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = glow;
+  g.fillRect(0, 200, 1080, 700);
+
+  // Highway in perspective.
+  g.beginPath();
+  const [hx0, hy0] = roadPoint(0, -0.55);
+  const [hx1, hy1] = roadPoint(0, 0.55);
+  const [nx1, ny1] = roadPoint(1, 4.3);
+  const [nx0, ny0] = roadPoint(1, -4.3);
+  g.moveTo(hx0, hy0);
+  g.lineTo(hx1, hy1);
+  g.lineTo(nx1, ny1);
+  g.lineTo(nx0, ny0);
+  g.closePath();
+  const asphalt = g.createLinearGradient(0, 470, 0, 1040);
+  asphalt.addColorStop(0, '#242b38');
+  asphalt.addColorStop(1, '#4a5468');
+  g.fillStyle = asphalt;
+  g.fill();
+
+  g.lineCap = 'round';
+  for (let lane = -3; lane <= 3; lane++) {
+    const yellow = lane === 0;
+    for (let s = 0; s < 14; s++) {
+      const t0 = s / 14;
+      const t1 = t0 + (yellow ? 0.055 : 0.028);
+      const [x0, y0] = roadPoint(t0, lane * 0.92);
+      const [x1, y1] = roadPoint(Math.min(1, t1), lane * 0.92);
+      g.strokeStyle = yellow ? '#ffd400' : 'rgba(244,247,251,0.9)';
+      g.lineWidth = yellow ? 4 + t0 * 6 : 2 + t0 * 5;
+      g.beginPath();
+      g.moveTo(x0, y0);
+      g.lineTo(x1, y1);
+      g.stroke();
+    }
+  }
+  // Neon edges.
+  for (const side of [-4.15, 4.15]) {
+    g.strokeStyle = side < 0 ? '#7ef6ff' : '#ff5ad8';
+    g.shadowColor = g.strokeStyle;
+    g.shadowBlur = 16;
+    g.lineWidth = 6;
+    g.beginPath();
+    const [a, b] = roadPoint(0.02, side);
+    g.moveTo(a, b);
+    for (let s = 1; s <= 16; s++) {
+      const [x, y] = roadPoint(s / 16, side);
+      g.lineTo(x, y);
+    }
+    g.stroke();
+  }
+  g.shadowBlur = 0;
+
+  // Laser bolts toward the vanishing point.
+  const bolts = [[-0.7, '#7ef6ff'], [0.55, '#ff5ad8'], [-0.15, '#fff4b0']];
+  for (const [lane, color] of bolts) {
+    g.strokeStyle = color;
+    g.shadowColor = color;
+    g.shadowBlur = 22;
+    g.lineWidth = 5;
+    g.beginPath();
+    const [x0, y0] = roadPoint(0.78, lane);
+    const [x1, y1] = roadPoint(0.18, lane * 0.4);
+    g.moveTo(x0, y0);
+    g.lineTo(x1, y1);
+    g.stroke();
+  }
+  g.shadowBlur = 0;
+
+  // Chase-view car.
+  const carColorHex = (typeof carColor === 'string' && carColor) ? carColor : '#e23b2e';
+  const cx = 540;
+  const cy = 860;
+  g.shadowColor = carColorHex;
+  g.shadowBlur = 28;
+  roundRectPath(g, cx - 78, cy - 36, 156, 78, 16);
+  g.fillStyle = carColorHex;
+  g.fill();
+  g.shadowBlur = 0;
+  roundRectPath(g, cx - 58, cy - 58, 116, 36, 10);
+  g.fillStyle = '#141820';
+  g.fill();
+  g.fillStyle = '#ff2a2a';
+  g.shadowColor = '#ff2a2a';
+  g.shadowBlur = 16;
+  roundRectPath(g, cx - 62, cy + 18, 28, 12, 3);
+  g.fill();
+  roundRectPath(g, cx + 34, cy + 18, 28, 12, 3);
+  g.fill();
+  g.shadowBlur = 0;
+
+  // Vignette.
+  const vignette = g.createRadialGradient(540, 640, 280, 540, 700, 820);
+  vignette.addColorStop(0, 'rgba(0,0,0,0)');
+  vignette.addColorStop(1, 'rgba(0,0,0,0.55)');
+  g.fillStyle = vignette;
+  g.fillRect(0, 0, 1080, 1350);
+
+  g.textAlign = 'center';
+  g.fillStyle = '#9aa3b5';
+  g.font = '700 28px "Segoe UI", sans-serif';
+  g.fillText('NIGHT HIGHWAY', 540, 64);
+  g.font = '800 78px "Segoe UI", sans-serif';
+  g.fillStyle = '#f4f6fb';
+  g.shadowColor = 'rgba(255,77,58,0.85)';
+  g.shadowBlur = 24;
+  g.fillText('ROAD RAGE', 540, 148);
+  g.shadowBlur = 0;
+
+  g.font = '700 24px "Segoe UI", sans-serif';
+  g.fillStyle = '#ffb4a8';
+  g.fillText('SCORE', 540, 196);
+
+  const scoreText = fmt(currentScore());
+  g.font = '800 112px "Segoe UI", sans-serif';
+  g.fillStyle = '#ffffff';
+  g.shadowColor = '#ff4d3a';
+  g.shadowBlur = 28;
+  g.fillText(scoreText, 540, 310);
+  g.shadowBlur = 0;
+
+  const record = document.getElementById('recordMsg');
+  if (record && record.textContent) {
+    g.font = '800 24px "Segoe UI", sans-serif';
+    const label = record.textContent;
+    const tw = g.measureText(label).width + 36;
+    roundRectPath(g, 540 - tw / 2, 328, tw, 40, 20);
+    g.fillStyle = 'rgba(125,255,179,0.18)';
+    g.fill();
+    g.fillStyle = '#7dffb3';
+    g.fillText(label, 540, 356);
+  }
+
+  const why = document.getElementById('crashWhy');
+  if (why && why.textContent) {
+    g.font = '600 26px "Segoe UI", sans-serif';
+    g.fillStyle = '#c5cedd';
+    g.fillText(why.textContent, 540, record && record.textContent ? 400 : 360);
+  }
+
+  const stats = [
+    ['DISTANCE', fmt(distance) + ' m'],
+    ['TOP SPEED', fmt(topSpeed * MPH) + ' mph'],
+    ['CARS PASSED', String(carsPassed)],
+    ['WRECKS', String(wrecks)],
+    ['AVG SPEED', document.getElementById('goAvg').textContent],
+    ['HEALTH', document.getElementById('goHp').textContent],
+    ['BEST', fmt(bestScore)],
+  ];
+  const panelY = 888;
+  roundRectPath(g, 90, panelY, 900, 320, 24);
+  g.fillStyle = 'rgba(6,8,16,0.72)';
+  g.fill();
+  g.strokeStyle = 'rgba(255,255,255,0.14)';
+  g.lineWidth = 2;
+  g.stroke();
+  stats.forEach((row, i) => {
+    const col = i % 2;
+    const line = Math.floor(i / 2);
+    const x = i === stats.length - 1 && col === 0 && line > 0 && (i % 2 === 0) ? 540 : 300 + (i % 2) * 480;
+    const y = panelY + 46 + line * 74;
+    g.textAlign = 'center';
+    g.font = '700 20px "Segoe UI", sans-serif';
+    g.fillStyle = '#9aa3b5';
+    g.fillText(row[0], x, y);
+    g.font = '800 32px "Segoe UI", sans-serif';
+    g.fillStyle = '#f4f6fb';
+    g.fillText(row[1], x, y + 36);
+  });
+
+  g.font = '800 28px "Segoe UI", sans-serif';
+  g.fillStyle = '#7ef6ff';
+  g.shadowColor = '#7ef6ff';
+  g.shadowBlur = 16;
+  g.fillText('PLAY NOW', 540, 1268);
+  g.shadowBlur = 0;
+  g.font = '700 32px "Segoe UI", sans-serif';
+  g.fillStyle = '#f4f6fb';
+  g.fillText('wireddude.github.io/road-rage', 540, 1318);
+  return canvas;
+}
+
+function canvasToPng(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error('Could not build score image'));
+    }, 'image/png');
+  });
+}
+
+function downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+async function copyShareText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (e) { /* fall through */ }
+  try {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.left = '-9999px';
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand('copy');
+    area.remove();
+    return !!ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function shareScore() {
+  const status = document.getElementById('shareStatus');
+  const button = document.getElementById('shareBtn');
+  if (button) button.disabled = true;
+  const text = shareBlurb();
+  try {
+    const blob = await canvasToPng(renderScoreCard());
+    const file = new File([blob], 'road-rage-score.png', { type: 'image/png' });
+    const payload = { title: 'Road Rage', text, files: [file] };
+    let canFiles = false;
+    try {
+      canFiles = !!(navigator.canShare && navigator.canShare(payload));
+    } catch (e) { canFiles = false; }
+    if (navigator.share && canFiles) {
+      await navigator.share(payload);
+      if (status) status.textContent = 'Shared.';
+      return;
+    }
+    downloadBlob(blob, 'road-rage-score.png');
+    const copied = await copyShareText(text);
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: 'Road Rage', text, url: PLAY_URL });
+        if (status) status.textContent = copied ? 'Shared. Image saved and link copied.' : 'Shared. Image saved.';
+        return;
+      } catch (e) {
+        if (e && e.name === 'AbortError') {
+          if (status) status.textContent = 'Image saved.';
+          return;
+        }
+      }
+    }
+    if (status) {
+      status.textContent = copied
+        ? 'Image saved and link copied.'
+        : 'Image saved. Play at wireddude.github.io/road-rage';
+    }
+  } catch (e) {
+    if (e && e.name === 'AbortError') return;
+    if (status) status.textContent = 'Could not share. Play at wireddude.github.io/road-rage';
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 
 function clearTraffic() {
@@ -3178,6 +3526,7 @@ bindHold(document.getElementById('btnFire'), 'fire');
 
 document.getElementById('driveBtn').addEventListener('click', () => { unlockAudio(); startGame(); });
 document.getElementById('retryBtn').addEventListener('click', startGame);
+document.getElementById('shareBtn').addEventListener('click', () => { shareScore(); });
 document.getElementById('resumeBtn').addEventListener('click', () => { if (mode === 'pause') setMode('play'); });
 document.getElementById('pauseRestartBtn').addEventListener('click', startGame);
 document.getElementById('titleBtn').addEventListener('click', goTitle);
@@ -3359,6 +3708,9 @@ api.clearHostiles = () => {
 api.collide = () => collidePlayer();
 api.extents = () => playerExtents();
 api.tryFire = () => { fireCd = 0; return tryFire(); };
+api.renderScoreCard = renderScoreCard;
+api.shareBlurb = shareBlurb;
+api.PLAY_URL = PLAY_URL;
 api.silence = () => {
   for (const n of npcs) deactivate(n);
   for (const c of crossCars) { c.alive = false; c.mesh.visible = false; }
